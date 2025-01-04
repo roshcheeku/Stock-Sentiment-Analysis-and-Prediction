@@ -4,12 +4,11 @@ import pandas as pd
 import random
 from datetime import datetime
 
-# ------------------- Fetching Stock Data from Yahoo Finance API -------------------
 def fetch_stock_data():
     conn = http.client.HTTPSConnection("yahoo-finance15.p.rapidapi.com")
 
     headers = {
-        'x-rapidapi-key': "2f55881c5emsh9ca9692ba4fda8ap15fe0djsn80b7c8801e02",
+        'x-rapidapi-key': "# your Yahoo Finance API ",
         'x-rapidapi-host': "yahoo-finance15.p.rapidapi.com"
     }
 
