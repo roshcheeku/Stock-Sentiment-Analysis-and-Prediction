@@ -2,7 +2,7 @@ import tweepy
 import csv
 
 # Define your credentials
-bearer_token = "AAAAAAAAAAAAAAAAAAAAANhqwQEAAAAAly8DSDMhQfBinZZu%2BkSamVWrFBs%3DosChdh2eouQAtAiaFJfk49R2tsRRHondwXTz3p5G4Hibe4tv3F"  # Replace with your Twitter API v2 Bearer Token
+bearer_token = "your bearer token"  # Replace with your Twitter API v2 Bearer Token
 
 # Authenticate using Tweepy Client for Twitter API v2
 client = tweepy.Client(bearer_token=bearer_token)
