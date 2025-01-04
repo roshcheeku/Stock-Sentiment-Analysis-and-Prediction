@@ -2,7 +2,7 @@ import tweepy
 import pandas as pd
 
 # Replace with your actual bearer token
-bearer_token = 'AAAAAAAAAAAAAAAAAAAAANhqwQEAAAAAIFD68CypJY206u2QF3wwZkJHbS8%3D3IAl4gdNAx9iqLJXBNIj1kH4PepvyfpJwkBZ3Njd2dypgSXw3O'
+bearer_token = 'yourtwitter bearertoken'
 
 # Initialize the client with the bearer token
 client = tweepy.Client(bearer_token=bearer_token)
