@@ -1,0 +1,27 @@
+import tweepy
+import pandas as pd
+
+# Replace with your actual bearer token
+bearer_token = 'AAAAAAAAAAAAAAAAAAAAANhqwQEAAAAAIFD68CypJY206u2QF3wwZkJHbS8%3D3IAl4gdNAx9iqLJXBNIj1kH4PepvyfpJwkBZ3Njd2dypgSXw3O'
+
+# Initialize the client with the bearer token
+client = tweepy.Client(bearer_token=bearer_token)
+
+# Define the query
+query = "stock OR stockmarket OR #investing"
+max_tweets = 100  # Maximum number of tweets to retrieve
+
+# Search for recent tweets
+try:
+    tweets = client.search_recent_tweets(query=query, max_results=max_tweets, tweet_fields=['created_at', 'text', 'author_id'])
+    
+    # Create a list to store the scraped data
+    tweets_data = [[tweet.created_at, tweet.text, tweet.author_id] for tweet in tweets.data]
+    
+    # Save to a DataFrame and CSV
+    df = pd.DataFrame(tweets_data, columns=['Date', 'Tweet', 'Author ID'])
+    df.to_csv('scraped_tweets_v2.csv', index=False)
+
+    print("Tweets scraped successfully!")
+except Exception as e:
+    print("Error:", e)
