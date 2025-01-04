@@ -4,9 +4,9 @@ import time
 
 # Define your Reddit API credentials
 reddit = praw.Reddit(
-    client_id="nc0EAIS3qzu0oWRKqTeYbQ",
-    client_secret="L8UDtovV2KeffNFg-ipY7tN01WfPrQ",
-   user_agent = "Python:stock:v1.0 (by u/Vast-Bookkeeper-7703)"
+    client_id="client id",
+    client_secret="client_secret",
+   user_agent = "user_agent"
 )
 # Define your search parameters
 subreddit_name = "stocks"  # Subreddit to search in
