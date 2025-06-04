@@ -1,117 +1,330 @@
-# app.py
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify, flash, redirect, url_for
 import pandas as pd
 import numpy as np
-from textblob import TextBlob
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
+import tensorflow as tf
+from tensorflow.keras.models import load_model
 import yfinance as yf
-import datetime
+import tweepy
+import praw
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
-from io import BytesIO
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
 import base64
+import io
+import os
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
 
-def get_stock_data(ticker, start_date, end_date):
-    data = yf.download(ticker, start=start_date, end=end_date)
-    return data
+# Configuration
+UPLOAD_FOLDER = 'static/plots'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-def analyze_sentiment(text):
-    analysis = TextBlob(text)
-    return analysis.sentiment.polarity
+# Supported stocks
+SUPPORTED_STOCKS = ['AAPL', 'AMZN', 'GOOG', 'MSFT', 'TSLA']
 
-def prepare_data(stock_data, news_data):
-    # Merge stock and news data
-    merged_data = pd.merge(stock_data, news_data, left_index=True, right_index=True, how='left')
-    merged_data['sentiment'] = merged_data['news_text'].apply(analyze_sentiment)
-    merged_data['sentiment'].fillna(0, inplace=True)
-    return merged_data
+# Initialize sentiment analyzer
+analyzer = SentimentIntensityAnalyzer()
 
-def train_model(X, y):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-    return model, X_test, y_test
-
-def plot_to_base64(fig):
-    buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight')
-    buf.seek(0)
-    image_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close(fig)
-    return image_base64
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
-        # Get user inputs
-        ticker = request.form['ticker']
-        start_date = request.form['start_date']
-        end_date = request.form['end_date']
-        news_text = request.form['news_text']
-        
-        # Process dates
-        start_date_obj = datetime.datetime.strptime(start_date, '%Y-%m-%d')
-        end_date_obj = datetime.datetime.strptime(end_date, '%Y-%m-%d')
-        
-        # Get stock data
+class StockPredictor:
+    def __init__(self):
+        self.models = {}
+        self.sentiment_models = {}
+        self.scalers = {}
+        self.load_models()
+    
+    def load_models(self):
+        """Load pre-trained LSTM models"""
+        for stock in SUPPORTED_STOCKS:
+            try:
+                # Load regular LSTM model
+                model_path = f'lstm_{stock.lower()}_model.h5'
+                if os.path.exists(model_path):
+                    self.models[stock] = load_model(model_path)
+                
+                # Load sentiment-enhanced LSTM model
+                sentiment_model_path = f'lstm_{stock.lower()}_model_with_sentiment.h5'
+                if os.path.exists(sentiment_model_path):
+                    self.sentiment_models[stock] = load_model(sentiment_model_path)
+                
+                # Initialize scaler for each stock
+                self.scalers[stock] = MinMaxScaler(feature_range=(0, 1))
+                
+            except Exception as e:
+                print(f"Error loading model for {stock}: {e}")
+    
+    def get_stock_data(self, symbol, period='1y'):
+        """Fetch real-time stock data"""
         try:
-            stock_data = get_stock_data(ticker, start_date, end_date)
-            if stock_data.empty:
-                raise ValueError("No data found for the given ticker and date range")
+            stock = yf.Ticker(symbol)
+            data = stock.history(period=period)
+            return data
+        except Exception as e:
+            print(f"Error fetching stock data for {symbol}: {e}")
+            return None
+    
+    def preprocess_data(self, data, lookback=60):
+        """Preprocess stock data for LSTM input"""
+        if data is None or len(data) < lookback:
+            return None, None
+        
+        # Use closing prices
+        prices = data['Close'].values.reshape(-1, 1)
+        
+        # Scale the data
+        scaled_data = self.scalers[data.index.name].fit_transform(prices)
+        
+        # Create sequences
+        X, y = [], []
+        for i in range(lookback, len(scaled_data)):
+            X.append(scaled_data[i-lookback:i, 0])
+            y.append(scaled_data[i, 0])
+        
+        return np.array(X), np.array(y)
+    
+    def predict_stock_price(self, symbol, use_sentiment=False):
+        """Make stock price predictions"""
+        try:
+            # Get stock data
+            stock_data = self.get_stock_data(symbol)
+            if stock_data is None:
+                return None, "Error fetching stock data"
             
-            # Create sample news data (in a real app, this would come from a database or API)
-            news_dates = pd.date_range(start=start_date_obj, end=end_date_obj)
-            news_data = pd.DataFrame({
-                'date': news_dates,
-                'news_text': [news_text] * len(news_dates)  # Using the same news text for all dates for demo
-            })
-            news_data.set_index('date', inplace=True)
+            # Preprocess data
+            X, y = self.preprocess_data(stock_data)
+            if X is None:
+                return None, "Insufficient data for prediction"
             
-            # Prepare data for model
-            merged_data = prepare_data(stock_data, news_data)
-            
-            # Create features and target
-            X = merged_data[['sentiment', 'Volume']].values
-            y = merged_data['Close'].values
-            
-            # Train model
-            model, X_test, y_test = train_model(X, y)
-            score = model.score(X_test, y_test)
+            # Select model
+            model = self.sentiment_models.get(symbol) if use_sentiment else self.models.get(symbol)
+            if model is None:
+                return None, f"Model not available for {symbol}"
             
             # Make prediction
-            current_sentiment = analyze_sentiment(news_text)
-            prediction = model.predict([[current_sentiment, 1000000]])  # Using sample volume
+            last_sequence = X[-1].reshape(1, -1, 1)
+            prediction = model.predict(last_sequence)
             
-            # Create plots
-            fig1, ax1 = plt.subplots(figsize=(10, 5))
-            merged_data['Close'].plot(ax=ax1)
-            ax1.set_title(f'{ticker} Stock Price')
-            ax1.set_ylabel('Price ($)')
-            plot1 = plot_to_base64(fig1)
+            # Inverse transform prediction
+            prediction_price = self.scalers[symbol].inverse_transform(prediction.reshape(-1, 1))[0][0]
+            current_price = stock_data['Close'].iloc[-1]
             
-            fig2, ax2 = plt.subplots(figsize=(10, 5))
-            merged_data['sentiment'].plot(ax=ax2, color='orange')
-            ax2.set_title('News Sentiment Over Time')
-            ax2.set_ylabel('Sentiment Score')
-            plot2 = plot_to_base64(fig2)
-            
-            return render_template('results.html', 
-                                 ticker=ticker,
-                                 start_date=start_date,
-                                 end_date=end_date,
-                                 current_price=merged_data['Close'].iloc[-1],
-                                 prediction=prediction[0],
-                                 model_score=score,
-                                 plot1=plot1,
-                                 plot2=plot2)
+            return {
+                'current_price': current_price,
+                'predicted_price': prediction_price,
+                'change': prediction_price - current_price,
+                'change_percent': ((prediction_price - current_price) / current_price) * 100,
+                'stock_data': stock_data
+            }, None
             
         except Exception as e:
-            error_message = f"Error processing your request: {str(e)}"
-            return render_template('index.html', error=error_message)
+            return None, f"Prediction error: {str(e)}"
+
+class SentimentAnalyzer:
+    def __init__(self):
+        self.analyzer = SentimentIntensityAnalyzer()
     
-    return render_template('index.html')
+    def analyze_text(self, text):
+        """Analyze sentiment of text"""
+        try:
+            scores = self.analyzer.polarity_scores(text)
+            return {
+                'compound': scores['compound'],
+                'positive': scores['pos'],
+                'negative': scores['neg'],
+                'neutral': scores['neu']
+            }
+        except Exception as e:
+            print(f"Error analyzing sentiment: {e}")
+            return None
+    
+    def get_sentiment_label(self, compound_score):
+        """Convert compound score to sentiment label"""
+        if compound_score >= 0.05:
+            return 'Positive'
+        elif compound_score <= -0.05:
+            return 'Negative'
+        else:
+            return 'Neutral'
+
+# Initialize predictors
+stock_predictor = StockPredictor()
+sentiment_analyzer = SentimentAnalyzer()
+
+def create_stock_chart(stock_data, symbol):
+    """Create stock price chart"""
+    try:
+        plt.figure(figsize=(12, 6))
+        plt.plot(stock_data.index, stock_data['Close'], label='Close Price', linewidth=2)
+        plt.plot(stock_data.index, stock_data['Open'], label='Open Price', alpha=0.7)
+        plt.title(f'{symbol} Stock Price Trend', fontsize=16, fontweight='bold')
+        plt.xlabel('Date', fontsize=12)
+        plt.ylabel('Price ($)', fontsize=12)
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        # Save plot to base64 string
+        img = io.BytesIO()
+        plt.savefig(img, format='png', dpi=150, bbox_inches='tight')
+        img.seek(0)
+        plot_url = base64.b64encode(img.getvalue()).decode()
+        plt.close()
+        
+        return plot_url
+    except Exception as e:
+        print(f"Error creating chart: {e}")
+        return None
+
+@app.route('/')
+def index():
+    """Main dashboard"""
+    return render_template('index.html', stocks=SUPPORTED_STOCKS)
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    """Handle stock prediction requests"""
+    try:
+        symbol = request.form.get('symbol', '').upper()
+        use_sentiment = request.form.get('use_sentiment') == 'on'
+        
+        if symbol not in SUPPORTED_STOCKS:
+            flash(f'Stock {symbol} is not supported. Please choose from: {", ".join(SUPPORTED_STOCKS)}', 'error')
+            return redirect(url_for('index'))
+        
+        # Make prediction
+        result, error = stock_predictor.predict_stock_price(symbol, use_sentiment)
+        
+        if error:
+            flash(f'Prediction error: {error}', 'error')
+            return redirect(url_for('index'))
+        
+        # Create chart
+        chart_url = create_stock_chart(result['stock_data'], symbol)
+        
+        return render_template('prediction.html', 
+                             symbol=symbol,
+                             result=result,
+                             chart_url=chart_url,
+                             use_sentiment=use_sentiment)
+        
+    except Exception as e:
+        flash(f'An error occurred: {str(e)}', 'error')
+        return redirect(url_for('index'))
+
+@app.route('/sentiment', methods=['GET', 'POST'])
+def sentiment():
+    """Sentiment analysis page"""
+    if request.method == 'POST':
+        text = request.form.get('text', '')
+        
+        if not text.strip():
+            flash('Please enter some text to analyze', 'error')
+            return render_template('sentiment.html')
+        
+        # Analyze sentiment
+        sentiment_result = sentiment_analyzer.analyze_text(text)
+        
+        if sentiment_result:
+            sentiment_label = sentiment_analyzer.get_sentiment_label(sentiment_result['compound'])
+            return render_template('sentiment.html', 
+                                 text=text,
+                                 sentiment_result=sentiment_result,
+                                 sentiment_label=sentiment_label)
+        else:
+            flash('Error analyzing sentiment', 'error')
+    
+    return render_template('sentiment.html')
+
+@app.route('/api/stock/<symbol>')
+def api_stock_data(symbol):
+    """API endpoint for stock data"""
+    try:
+        symbol = symbol.upper()
+        if symbol not in SUPPORTED_STOCKS:
+            return jsonify({'error': f'Stock {symbol} not supported'}), 400
+        
+        stock_data = stock_predictor.get_stock_data(symbol, period='1mo')
+        if stock_data is None:
+            return jsonify({'error': 'Could not fetch stock data'}), 500
+        
+        # Convert to JSON-serializable format
+        data = {
+            'symbol': symbol,
+            'current_price': float(stock_data['Close'].iloc[-1]),
+            'open_price': float(stock_data['Open'].iloc[-1]),
+            'high_price': float(stock_data['High'].iloc[-1]),
+            'low_price': float(stock_data['Low'].iloc[-1]),
+            'volume': int(stock_data['Volume'].iloc[-1]),
+            'last_updated': stock_data.index[-1].strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        return jsonify(data)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sentiment', methods=['POST'])
+def api_sentiment():
+    """API endpoint for sentiment analysis"""
+    try:
+        data = request.get_json()
+        text = data.get('text', '')
+        
+        if not text.strip():
+            return jsonify({'error': 'Text is required'}), 400
+        
+        sentiment_result = sentiment_analyzer.analyze_text(text)
+        if sentiment_result:
+            sentiment_label = sentiment_analyzer.get_sentiment_label(sentiment_result['compound'])
+            return jsonify({
+                'text': text,
+                'sentiment': sentiment_result,
+                'label': sentiment_label
+            })
+        else:
+            return jsonify({'error': 'Error analyzing sentiment'}), 500
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/dashboard')
+def dashboard():
+    """Multi-stock dashboard"""
+    stock_data = {}
+    
+    for symbol in SUPPORTED_STOCKS:
+        try:
+            data = stock_predictor.get_stock_data(symbol, period='5d')
+            if data is not None:
+                current_price = float(data['Close'].iloc[-1])
+                prev_price = float(data['Close'].iloc[-2]) if len(data) > 1 else current_price
+                change = current_price - prev_price
+                change_percent = (change / prev_price) * 100 if prev_price != 0 else 0
+                
+                stock_data[symbol] = {
+                    'current_price': current_price,
+                    'change': change,
+                    'change_percent': change_percent
+                }
+        except Exception as e:
+            print(f"Error fetching data for {symbol}: {e}")
+            continue
+    
+    return render_template('dashboard.html', stock_data=stock_data)
+
+@app.errorhandler(404)
+def not_found(error):
+    return render_template('error.html', error_code=404, error_message="Page not found"), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return render_template('error.html', error_code=500, error_message="Internal server error"), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
